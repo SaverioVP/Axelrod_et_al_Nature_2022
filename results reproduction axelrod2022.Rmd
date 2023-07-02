@@ -1,0 +1,390 @@
+---
+title: "Axelrod data 2022"
+author: "SVP"
+date: "2023-06-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+library(Seurat)
+#library(SeuratData)
+library(patchwork)
+```
+
+
+```{r}
+#data from: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE213486
+
+MC1.data <- Read10X(data.dir = "Mouse_MC_heart_1")
+#MC2.data <- Read10X(data.dir = "Mouse_MC_heart_2")
+Healthy.data <-Read10X(data.dir = "Mouse_healthy_heart_1")
+```
+```{r}
+#read.table(gzfile("Mouse_MC_heart_2/matrix.mtx.gz"))
+```
+```{r}
+#read.table(gzfile("Mouse_MC_heart_1/matrix.mtx.gz"))
+
+```
+```{r}
+#exp_matrix <- ReadMtx(mtx = "Mouse_MC_heart_1/matrix.mtx.gz", features = "Mouse_MC_heart_1/features.tsv.gz", cells = "Mouse_MC_heart_1/barcodes.tsv.gz")
+```
+
+```{r}
+#exp_matrix
+```
+
+```{r}
+MC1 <- CreateSeuratObject(counts = MC1.data, project = "Myocarditis", min.cells = 3, min.features = 200)
+#MC2 <- CreateSeuratObject(counts = MC2.data, project = "Mouse2", min.cells = 3, min.features = 200)
+
+Healthy <- CreateSeuratObject(counts = Healthy.data, project = "Healthy", min.cells = 3, min.features = 200)
+
+head(MC1@meta.data, 5)
+```
+
+```{r}
+#Add column for percent mt to the dataset
+MC1[["percent.mt"]] <- PercentageFeatureSet(MC1, pattern = "^mt-")
+#MC2[["percent.mt"]] <- PercentageFeatureSet(MC2, pattern = "^mt-")
+
+Healthy[["percent.mt"]] <- PercentageFeatureSet(Healthy, pattern = "^mt-")
+
+```
+
+```{r}
+# Show QC metrics for the first 5 cells
+head(MC1@meta.data, 5)
+```
+
+```{r}
+#Visualize QC metrics as a violin plot
+VlnPlot(MC1, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+#VlnPlot(MC2, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+VlnPlot(Healthy, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+```
+
+
+```{r}
+MC1
+Healthy
+```
+
+
+```{r}
+# FIlter cells using the amounts in the paper
+MC1 <- subset(MC1, subset = nFeature_RNA > 200 & nFeature_RNA < 5000 & percent.mt < 10)
+#MC2 <- subset(MC2, subset = nFeature_RNA > 200 & nFeature_RNA < 3000 & percent.mt < 15)
+
+Healthy <- subset(Healthy, subset = nFeature_RNA > 200 & nFeature_RNA < 3000 & percent.mt < 10)
+```
+
+```{r}
+# How many cells after filt
+MC1
+#MC2
+Healthy
+```
+```{r}
+# Normalize the data
+#MC1 <- NormalizeData(MC1, normalization.method = "LogNormalize", scale.factor = 1e4)
+#Healthy <- NormalizeData(Healthy, normalization.method = "LogNormalize", scale.factor = 1e4)
+options(warn=-1)
+# run sctransform
+MC1 <- SCTransform(MC1, vars.to.regress = "percent.mt", verbose = FALSE)
+#MC2 <- SCTransform(MC1, vars.to.regress = "percent.mt", verbose = FALSE)
+
+Healthy <- SCTransform(Healthy, vars.to.regress = "percent.mt", verbose = FALSE)
+```
+
+```{r}
+# integration of datasets
+# select features that are repeatedly variable across datasets for integration
+ifnb.list<- c(Healthy, MC1)
+features <- SelectIntegrationFeatures(object.list = c(Healthy, MC1), nfeatures = 3000)
+ifnb.list <- PrepSCTIntegration(object.list = ifnb.list, anchor.features = features)
+
+immune.anchors <- FindIntegrationAnchors(object.list = ifnb.list, normalization.method = "SCT",
+    anchor.features = features)
+
+```
+```{r}
+# integrate condintued
+
+immune.combined <- IntegrateData(anchorset = immune.anchors, normalization.method = "SCT")
+# this command creates an 'integrated' data assay
+immune.combined <- IntegrateData(anchorset = immune.anchors)
+DefaultAssay(immune.combined) <- "integrated"
+
+# Run the standard workflow for visualization and clustering
+immune.combined <- ScaleData(immune.combined, verbose = FALSE)
+immune.combined <- RunPCA(immune.combined, npcs = 75, verbose = FALSE)
+ElbowPlot(immune.combined,ndims = 75)
+```
+```{r}
+dim<-30
+immune.combined1 <- RunUMAP(immune.combined, reduction = "pca", dims = 1:dim, min.dist = 0.5)
+immune.combined2 <- FindNeighbors(immune.combined1, reduction = "pca", dims = 1:dim)
+immune.combined3 <- FindClusters(immune.combined2, resolution = 0.05)
+```
+
+```{r}
+p2 <- DimPlot(immune.combined3, reduction = "umap", label = TRUE, repel = TRUE, split.by="orig.ident")
+#p2 <- DimPlot(immune.combined, reduction = "umap", label = TRUE, repel = TRUE, group.by = "orig.ident") 
+
+p2
+```
+```{r}
+#Featureplot to color by gene
+# Naive T cell markers: CD45RA, CCR7, CD62L, CD127, CD132
+# Activated T cell markers: CD69, CD44, CD62L (downreg, CD25)
+
+feature_T_cells <- subset(immune.combined3, subset=seurat_clusters %in% 2)
+
+FeaturePlot(object = feature_T_cells, features = c('Ccl5', 'Ccl4','Tigit','Nkg7', 'Gzmb')) #activated T cells
+
+#Naive T cell
+
+FeaturePlot(object = feature_T_cells, features = c('Ccr7', 'Lef1', 'Sell'))
+```
+
+```{r}
+#Tcell_separation_markers <- FindMarkers(immune.combined, ident.1 = 3, ident.2 = 1, min.pct = 0.25)
+#head(Tcell_separation_markers)
+
+```
+
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+
+```{r}
+# Find top marker genes in each cluster, then identify cell type manually
+cluster0.markers <- FindMarkers(immune.combined3, ident.1 = 0, min.pct = 0.25)
+cluster1.markers <- FindMarkers(immune.combined3, ident.1 = 1, min.pct = 0.25)
+cluster2.markers <- FindMarkers(immune.combined3, ident.1 = 2, min.pct = 0.25)
+cluster3.markers <- FindMarkers(immune.combined3, ident.1 = 3, min.pct = 0.25)
+cluster4.markers <- FindMarkers(immune.combined3, ident.1 = 4, min.pct = 0.25)
+cluster5.markers <-FindMarkers(immune.combined3, ident.1 = 5, min.pct = 0.25)
+# Can also colour UMAP by eg. CD4
+
+cluster0.markers # B cell
+cluster1.markers # myeloid
+cluster2.markers # T cell
+cluster3.markers # myeloid
+cluster4.markers # NK
+cluster5.markers # naive CD8 T cells
+```
+
+
+```{r}
+
+#cluster0.markers  # B cells
+#cluster1.markers # Activated T cell
+#cluster2.markers  # Naive T cell
+#cluster3.markers # Activated T cell
+#cluster4.markers # NK cells
+
+```
+
+
+```{r}
+new.cluster.ids <- c("B cells", "Myeloid", "T cells", "Myeloid", "NK")
+names(new.cluster.ids) <- levels(immune.combined3)
+immune.combined3 <- RenameIdents(immune.combined3, new.cluster.ids)
+DimPlot(immune.combined3, reduction = 'umap', label = TRUE, pt.size = 0.5, split.by = "orig.ident") + NoLegend()
+```
+
+
+```{r}
+library(ggplot2)
+library(tidyverse)
+
+freq_table_sample <- as.data.frame(prop.table(x = table(Idents(immune.combined3), immune.combined3@meta.data$orig.ident), margin = 2))
+
+#freq_table_sample <-freq_table_sample %>% arrange(desc(row_number()))
+#freq_table_sample
+
+#freq_table_sample <- freq_table_sample %>% mutate(name = fct_relevel( 
+#            "Healthy", "Myocarditis"))
+
+ggplot(data=freq_table_sample, aes(x=freq_table_sample$Var2, y=freq_table_sample$Freq, fill=freq_table_sample$Var1)) + 
+  geom_bar(stat="identity", color="black") + 
+  labs(x="Sample", y="Proportion of Cells", fill="Cluster")  + 
+  scale_x_discrete(limits = rev(levels(freq_table_sample$Var2))) +
+  geom_text(aes(label=paste0(sprintf("%1.1f", freq_table_sample$Freq*100),"%")),
+                          position=position_stack(vjust=0.5))
+
+
+```
+
+```{r}
+# filter just for T cells 
+
+# Run the standard workflow for visualization and clustering
+Tcellfiltered_0 <- ScaleData(immune.combined3, verbose = FALSE)
+Tcellfiltered_01 <- RunPCA(Tcellfiltered_0, npcs = 75, verbose = FALSE)
+ElbowPlot(Tcellfiltered_01,ndims = 75)
+
+
+Tcellfiltered <- subset(Tcellfiltered_01, subset = Cd3e > 1.5)
+dim<-30
+Tcellfiltered1 <- RunUMAP(Tcellfiltered, reduction = "pca", dims = 1:dim, min.dist = 0.5)
+Tcellfiltered2 <- FindNeighbors(Tcellfiltered1, reduction = "pca", dims = 1:dim)
+Tcellfiltered3  <- FindClusters(Tcellfiltered2, resolution = 1.3)
+
+
+p3 <- DimPlot(Tcellfiltered3, reduction = "umap", label = TRUE, repel = TRUE)
+#p2 <- DimPlot(immune.combined, reduction = "umap", label = TRUE, repel = TRUE, group.by = "orig.ident") 
+
+p3
+```
+
+```{r}
+freq_table_sample <- as.data.frame(prop.table(x = table(Idents(Tcellfiltered3), Tcellfiltered3@meta.data$orig.ident), margin = 2))
+
+
+ggplot(data=freq_table_sample, aes(x=freq_table_sample$Var2, y=freq_table_sample$Freq, fill=freq_table_sample$Var1)) + 
+  geom_bar(stat="identity", color="black") + 
+  labs(x="Sample", y="Proportion of Cells", fill="Cluster")  + 
+  scale_x_discrete(limits = rev(levels(freq_table_sample$Var2))) +
+  geom_text(aes(label=paste0(sprintf("%1.1f", freq_table_sample$Freq*100),"%")),
+                          position=position_stack(vjust=0.5)) 
+```
+
+```{r}
+library(EnhancedVolcano)
+#library(DESeq2)
+cluster0.markers <- FindMarkers(Tcellfiltered3, ident.1 = 0, ident.2 = c(1,2,3,4), min.pct = 0.0001,   min.cells.feature = 1, min.cells.group = 1, logfc.threshold = 0.01)
+
+cluster0.markers
+#rownames(cluster0.markers)
+#dds <- DESeq(Tcellfiltered3)
+
+EnhancedVolcano(cluster0.markers,
+    lab = rownames(cluster0.markers),
+    x = 'avg_log2FC',
+    y = 'p_val_adj',
+    title = 'Other Clusters vs. Cluster 0',
+    pCutoff = 0.05,
+    FCcutoff = 3,
+    pointSize = 1.0,
+    labSize = 6.0,
+    col=c('black','black','red3', 'red3'),
+    legendLabels = c("NS", expression(Log[2] ~ FC), "p_val < 0.05", expression(p - value ~ and
+    ~ log[2] ~ FC)),
+    colAlpha = 1,
+    ylim = c(0, -log10(10e-10)))
+```
+
+```{r}
+Tcellfiltered3$nFeature_RNA
+```
+
+
+```{r}
+  if (!requireNamespace('BiocManager', quietly = TRUE))
+    install.packages('BiocManager')
+
+  BiocManager::install('EnhancedVolcano')
+```
+
+
+
+
+```{r}
+# Feature plots
+#dev.new(width=100, height=100)
+FeaturePlot(immune.combined3, features = c("Cd3e", "Cd8a", "Cd4", "Cd19"  ), label.size = 1, ncol = 2:2)
+FeaturePlot(immune.combined3, features = c( "Cd68", "Cd14", "Csf3r", "Itgam"), label.size = 1, ncol = 2:2)
+FeaturePlot(immune.combined3, features = c( "Ms4a1", "Cd79a", "Klrb1c", "Nkg7"), label.size = 1, ncol = 2:2)            
+           
+      
+```
+
+
+```{r}
+VlnPlot(Tcellfiltered3, features = c("Cd8a", "Cd4"))
+```
+
+Everything below this probably wont work because it wasnt done with the integration
+
+
+
+```{r}
+# Feature selection
+MC1 <- FindVariableFeatures(MC1, selection.method = 'vst', nfeatures = 2000)
+Healthy <- FindVariableFeatures(Healthy, selection.method = 'vst', nfeatures = 2000)
+
+```
+
+```{r}
+# Scaling
+
+all.genes <- rownames(MC1)
+MC1 <- ScaleData(MC1, features = all.genes)
+```
+
+
+```{r}
+# PCA
+MC1 <- RunPCA(MC1, features = VariableFeatures(object = MC1))
+```
+
+
+```{r}
+# Examine and visualize PCA results a few different ways
+
+print(MC1[['pca']], dims = 1:5, nfeatures = 5)
+DimPlot(MC1, reduction = 'pca')
+```
+
+
+```{r}
+VizDimLoadings(MC1, dims = 1:2, reduction = 'pca')
+```
+
+
+```{r}
+DimHeatmap(MC1, dims = 1, cells = 500, balanced = TRUE)
+```
+
+
+```{r}
+# determine idmensionality
+ElbowPlot(MC1)
+```
+```{r}
+#cluster
+MC1 <- FindNeighbors(MC1, dims = 1:11)
+MC1 <- FindClusters(MC1, resolution = 0.2)
+```
+
+
+```{r}
+MC1 <- RunUMAP(MC1, dims = 1:11)
+```
+
+
+```{r}
+DimPlot(MC1, reduction = 'umap')
+```
+
